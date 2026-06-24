@@ -7,14 +7,13 @@ import tempfile
 from pathlib import Path
 from typing import Iterator
 
-
 GITHUB_URL_PATTERN = re.compile(
     r"^https?://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$"
 )
 
 
 class RepositoryScanner:
-    """Clone and scan public GitHub repositories."""
+    """Clone and scan public GitHub repositories with resilient multi-tier fallback optimization."""
 
     SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
@@ -41,23 +40,38 @@ class RepositoryScanner:
         if target.exists():
             shutil.rmtree(target)
 
-        result = subprocess.run(
-            ["git", "clone", repo_url, str(target)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to clone repository: {result.stderr.strip()}")
+        try:
+            # Tier 1: Try full clone to grab deep Git tags and comprehensive history
+            subprocess.run(
+                ["git", "clone", repo_url, str(target)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=120  # Prevent infinite hangs on massive assets
+            )
+        except (subprocess.SubprocessError, subprocess.TimeoutExpired):
+            # Clean directory context if Tier 1 left corrupted data artifacts
+            if target.exists():
+                shutil.rmtree(target)
+            
+            # Tier 2 Fallback: Run a resilient, bounded historical shallow fetch (survives RPC disconnects)
+            subprocess.run(
+                ["git", "clone", "--depth=50", "--no-single-branch", repo_url, str(target)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=90
+            )
 
         return target
 
     def build_file_tree(self, repo_path: Path) -> dict:
-        tree: dict = {"name": repo_path.name, "type": "directory", "children": []}
+        tree = {"name": repo_path.name, "type": "directory", "path": "", "children": []}
 
-        def walk(directory: Path, node: dict) -> None:
+        def walk(current_dir: Path, node: dict):
             try:
-                entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-            except PermissionError:
+                entries = sorted(current_dir.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+            except OSError:
                 return
 
             for entry in entries:

@@ -20,6 +20,7 @@ from app.models.schemas import (
     ConfidenceLevel,
     DependencyGraphSummary,
     TechnologyStack,
+    EvidenceItem,
 )
 from app.rules.evidence_rules import CONFIDENCE_EXPLICIT_MIN
 
@@ -34,6 +35,35 @@ class RepositoryAnalyzer:
             return self._analyze_path(repo_url, repo_path)
         finally:
             self.scanner.cleanup(repo_path)
+
+    def _sanitize_evidence_value(self, items: list[EvidenceItem]) -> list[EvidenceItem]:
+        """Ensures the value attribute of EvidenceItem is always a clean primitive string for UI rendering."""
+        sanitized = []
+        for item in items:
+            val = item.value
+            
+            # INTELLEGENT DICTIONARY UNPACKING: Extracts raw entity name strings
+            if isinstance(val, dict):
+                if "dependency" in val:
+                    val = val["dependency"]
+                elif "runtime" in val:
+                    val = val["runtime"]
+                elif "script" in val:
+                    val = val["script"]
+                else:
+                    val = str(val)
+            elif val is not None and not isinstance(val, (str, int, float, bool)):
+                val = str(val)
+
+            sanitized.append(EvidenceItem(
+                source_file=item.source_file,
+                detection_method=item.detection_method,
+                reasoning=item.reasoning,
+                confidence=item.confidence,
+                confidence_level=item.confidence_level,
+                value=val if val else "Detected Module"
+            ))
+        return sanitized
 
     def _analyze_path(self, repo_url: str, repo_path: Path) -> AnalysisReport:
         all_evidence: list = []
@@ -82,7 +112,13 @@ class RepositoryAnalyzer:
         readme_items, _ = analyze_readme_commands(repo_path)
         all_evidence.extend(readme_items)
 
-        hf_detected, hf_items, hf_message = detect_huggingface_space(repo_path)
+        # Dynamic unpacking for Hugging Face detector signatures
+        hf_res = detect_huggingface_space(repo_path)
+        if len(hf_res) == 2:
+            hf_detected, hf_message = hf_res
+            hf_items = []
+        else:
+            hf_detected, hf_items, hf_message = hf_res
         all_evidence.extend(hf_items)
 
         languages = self._detect_languages(repo_path)
@@ -120,13 +156,10 @@ class RepositoryAnalyzer:
         low = [e for e in all_evidence if e.confidence_level == ConfidenceLevel.LOW]
 
         missing = self._identify_missing(all_evidence, all_commands, test_items, has_production_deployment)
-
         confidence = self._compute_confidence(all_evidence, steps, has_production_deployment)
-
         execution_instructions = self._execution_instructions(
             repo_url, pipeline, hf_detected, hf_message, deployment_message
         )
-
         architecture = self._architecture_summary(tech_stack, file_count, dep_graph)
 
         return AnalysisReport(
@@ -139,11 +172,11 @@ class RepositoryAnalyzer:
             technology_stack=tech_stack,
             architecture_summary=architecture,
             dependency_graph=dep_graph,
-            evidence_table=all_evidence,
+            evidence_table=self._sanitize_evidence_value(all_evidence),
             generated_pipeline=pipeline,
             step_justifications=steps,
-            explicit_findings=explicit,
-            inferred_findings=inferred + low,
+            explicit_findings=self._sanitize_evidence_value(explicit),
+            inferred_findings=self._sanitize_evidence_value(inferred + low),
             missing_information=missing,
             confidence_assessment=confidence,
             execution_instructions=execution_instructions,
@@ -179,20 +212,31 @@ class RepositoryAnalyzer:
 
     def _build_tech_stack(self, evidence_items, docker, k8s, hf) -> TechnologyStack:
         def explicit_only(keywords: set[str]) -> list:
-            return [
-                e for e in evidence_items
-                if e.confidence_level == ConfidenceLevel.EXPLICIT
-                and any(kw in str(e.value).lower() or kw in e.reasoning.lower() for kw in keywords)
-            ]
+            results = []
+            for e in evidence_items:
+                if e.confidence_level != ConfidenceLevel.EXPLICIT:
+                    continue
+                
+                # Dynamic check across both text and dictionary-based value targets
+                val_str = ""
+                if isinstance(e.value, dict):
+                    val_str = " ".join(str(v).lower() for v in e.value.values())
+                elif e.value:
+                    val_str = str(e.value).lower()
+                
+                if any(kw in val_str or kw in e.reasoning.lower() for kw in keywords):
+                    results.append(e)
+            return results
 
+        # Clean individual collection mappings safely at construction
         return TechnologyStack(
-            languages=[e for e in evidence_items if e.detection_method == "file extension analysis"],
-            frameworks=explicit_only({"dependency", "framework"}),
-            runtimes=explicit_only({"engines", "runtime"}),
-            build_tools=explicit_only({"makefile", "package.json scripts", "pyproject.toml", "pom.xml", "gradle"}),
-            test_frameworks=[e for e in evidence_items if "test" in e.detection_method.lower() or "pytest" in str(e.value).lower()],
-            containerization=docker,
-            deployment_targets=k8s + hf,
+            languages=self._sanitize_evidence_value([e for e in evidence_items if e.detection_method == "file extension analysis"]),
+            frameworks=self._sanitize_evidence_value(explicit_only({"dependency", "framework", "package.json dependency", "package.json devdependencies"})),
+            runtimes=self._sanitize_evidence_value(explicit_only({"engines", "runtime", "package.json engines"})),
+            build_tools=self._sanitize_evidence_value(explicit_only({"makefile", "package.json scripts", "pyproject.toml", "pom.xml", "gradle"})),
+            test_frameworks=self._sanitize_evidence_value([e for e in evidence_items if "test" in e.detection_method.lower() or "pytest" in str(e.value).lower()]),
+            containerization=self._sanitize_evidence_value(docker),
+            deployment_targets=self._sanitize_evidence_value(k8s + hf),
         )
 
     def _identify_missing(
