@@ -1,12 +1,14 @@
-export default function ConfidenceBar({ value }) {
+export default function ConfidenceBar({ value, showPct = true }) {
   const pct = Math.round(value * 100);
-  let color = "var(--color-low)";
-  if (value >= 0.9) color = "var(--color-high)";
-  else if (value >= 0.6) color = "var(--color-mid)";
+  const color =
+    value >= 0.9 ? "var(--green)" : value >= 0.65 ? "var(--amber)" : "var(--red)";
 
   return (
-    <div className="confidence-bar" title={`${pct}%`}>
-      <div className="confidence-fill" style={{ width: `${pct}%`, background: color }} />
-    </div>
+    <span className="conf-row" style={{ flex: 1, minWidth: 0 }}>
+      <span className="conf-bar-wrap">
+        <span className="conf-bar-fill" style={{ width: `${pct}%`, background: color }} />
+      </span>
+      {showPct && <span className="conf-pct">{pct}%</span>}
+    </span>
   );
 }

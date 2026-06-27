@@ -1,35 +1,28 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# start.sh — dev launcher
+set -e
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$(dirname "$0")"
 
-echo "Starting Repository CI/CD Auditor..."
-
-# Backend
-cd "$ROOT/backend"
-if [ ! -d .venv ]; then
-  python3 -m venv .venv
-  source .venv/bin/activate
-  pip install -r requirements.txt -q
-else
-  source .venv/bin/activate
-fi
-
-uvicorn app.main:app --reload --port 8000 &
+echo "▶ Starting FastAPI backend…"
+cd backend
+pip install -r requirements.txt -q
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
+cd ..
 
-# Frontend
-cd "$ROOT/frontend"
-if [ ! -d node_modules ]; then
-  npm install -q
-fi
+echo "▶ Starting React frontend…"
+cd frontend
+npm install -q
 npm run dev &
 FRONTEND_PID=$!
+cd ..
 
 echo ""
-echo "Backend:  http://localhost:8000"
-echo "Frontend: http://localhost:5173"
-echo "Press Ctrl+C to stop"
+echo "  Backend  → http://localhost:8000"
+echo "  Frontend → http://localhost:5173"
+echo ""
+echo "  Press Ctrl+C to stop both."
 
 trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null" EXIT
 wait

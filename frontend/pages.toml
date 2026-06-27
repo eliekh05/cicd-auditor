@@ -1,0 +1,13 @@
+# Cloudflare Pages — build settings
+# Configure these in the Pages dashboard or via wrangler pages project create
+
+[build]
+  command   = "npm run build"
+  directory = "dist"
+
+# Redirect /api/* to the Worker (or directly to your backend)
+# Add this as a _redirects file in the public/ or dist/ root:
+#   /api/*  https://cicd-auditor.YOUR_SUBDOMAIN.workers.dev/api/:splat  200
+
+# Environment variables (Pages dashboard > Settings > Environment variables):
+#   VITE_API_BASE = https://cicd-auditor.YOUR_SUBDOMAIN.workers.dev

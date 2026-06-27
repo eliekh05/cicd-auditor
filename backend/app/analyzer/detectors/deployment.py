@@ -1,142 +1,135 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
-from app.analyzer.detectors.base import RepositoryCommand, evidence, find_files, is_production_path
-from app.models.schemas import ConfidenceLevel, EvidenceItem
+from app.analyzer.helpers import find, make_evidence, rel
+from app.models.schemas import Command, Confidence, Evidence
+from app.rules import is_production
+
+_SKIP = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"})
+_COMPOSE_NAMES = frozenset({
+    "compose.yml", "compose.yaml",
+    "docker-compose.yml", "docker-compose.yaml",
+})
 
 
-def analyze_dockerfile(repo_path: Path) -> tuple[list[EvidenceItem], list[RepositoryCommand], list[EvidenceItem]]:
-    """Parses single and multi-nested Dockerfiles and extracts Docker Compose configuration matrices."""
-    items: list[EvidenceItem] = []
-    commands: list[RepositoryCommand] = []
-    deployment_items: list[EvidenceItem] = []
+def detect_docker(repo: Path) -> tuple[list[Evidence], list[Command], list[Evidence]]:
+    """Returns (all_evidence, commands, production_evidence)."""
+    evidence: list[Evidence] = []
+    commands: list[Command] = []
+    production: list[Evidence] = []
 
-    for dockerfile in find_files(repo_path, {"Dockerfile", "dockerfile"}):
-        rel = str(dockerfile.relative_to(repo_path))
-        production = is_production_path(rel)
+    # Dockerfile
+    for df in find(repo, {"Dockerfile", "dockerfile"}):
+        r = rel(repo, df)
+        prod = is_production(r)
+        e = make_evidence(
+            r, "Dockerfile",
+            "Container image definition" + ("" if prod else " (non-production path)"),
+            0.98 if prod else 0.75, "docker",
+            confidence=Confidence.EXPLICIT if prod else Confidence.INFERRED,
+        )
+        evidence.append(e)
+        if prod:
+            production.append(e)
+
         try:
-            content = dockerfile.read_text(encoding="utf-8")
+            content = df.read_text(encoding="utf-8")
         except OSError:
             continue
-
-        presence = evidence(
-            rel, "Dockerfile presence",
-            "Containerization via Dockerfile detected" + ("" if production else " (non-production path)"),
-            0.98 if production else 0.75,
-            "docker",
-            level=ConfidenceLevel.EXPLICIT if production else ConfidenceLevel.INFERRED,
-        )
-        items.append(presence)
-        if production:
-            deployment_items.append(presence)
-
         for line in content.splitlines():
-            line_stripped = line.strip()
-            if line_stripped.startswith("RUN "):
-                cmd_part = line_stripped[4:].strip()
-                if any(kw in cmd_part for kw in ("pip install", "npm install", "yarn install", "bun install")):
-                    continue
-                commands.append(RepositoryCommand(
-                    command=cmd_part,
-                    source_file=rel,
-                    detection_method="Dockerfile RUN command",
-                    confidence=0.85,
-                    category="docker",
-                ))
-
-    # Catch Docker Compose Files
-    for path in repo_path.rglob("*"):
-        if path.is_file() and path.name in {"compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"}:
-            rel_comp = str(path.relative_to(repo_path))
-            if not is_production_path(rel_comp):
+            stripped = line.strip()
+            if not stripped.startswith("RUN "):
                 continue
-            comp_evidence = evidence(
-                rel_comp, "Docker Compose configuration",
-                "Multi-container target configuration detected via compose manifest specifications.",
-                0.99,
-                "docker-compose",
-                level=ConfidenceLevel.EXPLICIT
-            )
-            items.append(comp_evidence)
-            deployment_items.append(comp_evidence)
-            commands.append(RepositoryCommand(
-                command=f"docker compose -f {path.name} build",
-                source_file=rel_comp,
-                detection_method="Docker Compose configuration target",
-                confidence=0.98,
-                category="build"
+            cmd_part = stripped[4:].strip()
+            if any(kw in cmd_part for kw in ("pip install", "npm install", "yarn install")):
+                continue
+            commands.append(Command(
+                cmd=cmd_part, source=r, method="Dockerfile RUN",
+                score=0.85, category="docker", pipeline_eligible=False,
             ))
 
-    return items, commands, deployment_items
+    # Docker Compose
+    for path in repo.rglob("*"):
+        if not path.is_file() or path.name not in _COMPOSE_NAMES:
+            continue
+        if _SKIP & set(path.relative_to(repo).parts):
+            continue
+        r = rel(repo, path)
+        if not is_production(r):
+            continue
+        e = make_evidence(
+            r, "Docker Compose",
+            "Multi-container orchestration manifest",
+            0.99, "docker-compose",
+        )
+        evidence.append(e)
+        production.append(e)
+        commands.append(Command(
+            cmd=f"docker compose -f {path.name} build",
+            source=r, method="Docker Compose",
+            score=0.98, category="build", pipeline_eligible=True,
+        ))
+
+    return evidence, commands, production
 
 
-def analyze_kubernetes(repo_path: Path) -> list[EvidenceItem]:
-    """Identifies deployment infrastructures by tracking explicit file configurations and front-end build matrices."""
-    items: list[EvidenceItem] = []
+def detect_kubernetes(repo: Path) -> list[Evidence]:
+    evidence: list[Evidence] = []
     seen: set[str] = set()
 
-    # 1. Search for traditional cloud cluster files
-    for yml_path in repo_path.rglob("*"):
-        if not yml_path.is_file() or yml_path.suffix not in {".yml", ".yaml"}:
+    for path in repo.rglob("*"):
+        if not path.is_file() or path.suffix not in {".yml", ".yaml"}:
             continue
-        rel = str(yml_path.relative_to(repo_path))
-        if not is_production_path(rel) or rel in seen:
+        if _SKIP & set(path.relative_to(repo).parts):
+            continue
+        r = rel(repo, path)
+        if not is_production(r) or r in seen:
             continue
         try:
-            raw = yml_path.read_text(encoding="utf-8", errors="replace")
-            if "apiVersion:" in raw and "kind:" in raw:
-                items.append(evidence(
-                    rel, "Kubernetes manifest configuration",
-                    "Orchestration resource mapping verified via internal API structure specifications.",
-                    0.98, "kubernetes"
-                ))
-                seen.add(rel)
+            raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        if "apiVersion:" in raw and "kind:" in raw:
+            evidence.append(make_evidence(r, "Kubernetes manifest", "K8s resource manifest", 0.98, "kubernetes"))
+            seen.add(r)
 
-    # 2. SPA FRONTEND TARGET CHECK: Prevents SPA frameworks like pkgui from logging empty deployment records
-    for spa_config in find_files(repo_path, {"vite.config.js", "vite.config.ts", "next.config.js", "nuxt.config.js"}):
-        rel_spa = str(spa_config.relative_to(repo_path))
-        if not is_production_path(rel_spa):
-            continue
-        spa_evidence = evidence(
-            rel_spa, "Single Page Application Build Engine",
-            f"Production static hosting deployment target identified via {spa_config.name} compilation metrics.",
-            0.95,
-            "static-web-hosting",
-            level=ConfidenceLevel.EXPLICIT
-        )
-        items.append(spa_evidence)
+    # Helm
+    for helm in find(repo, {"Chart.yaml"}):
+        r = rel(repo, helm)
+        if is_production(r):
+            evidence.append(make_evidence(r, "Helm chart", "Helm Chart.yaml detected", 0.98, "helm"))
 
-    for helm in find_files(repo_path, {"Chart.yaml"}):
-        rel = str(helm.relative_to(repo_path))
-        if not is_production_path(rel):
-            continue
-        items.append(evidence(rel, "Helm Chart.yaml", "Helm chart detected", 0.98, "helm"))
+    # SPA build configs treated as static hosting targets
+    for spa in find(repo, {"vite.config.js", "vite.config.ts", "next.config.js", "nuxt.config.js"}):
+        r = rel(repo, spa)
+        if is_production(r):
+            evidence.append(make_evidence(
+                r, "SPA build config",
+                f"Static hosting target via {spa.name}",
+                0.95, "static-hosting",
+            ))
 
-    return items
+    return evidence
 
 
-def analyze_env_example(repo_path: Path) -> list[EvidenceItem]:
-    items: list[EvidenceItem] = []
-    for env_file in find_files(repo_path, {".env.example", ".env.sample", "env.example"}):
-        rel = str(env_file.relative_to(repo_path))
+def detect_env(repo: Path) -> list[Evidence]:
+    evidence: list[Evidence] = []
+    for path in find(repo, {".env.example", ".env.sample", "env.example"}):
+        r = rel(repo, path)
         try:
-            lines = env_file.read_text(encoding="utf-8").splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
                 continue
-            if "=" in line:
-                var_name = line.split("=")[0].strip()
-                items.append(evidence(
-                    rel, ".env.example variable",
-                    f"Environment variable name listed in example file: {var_name}",
-                    0.75, var_name,
-                    level=ConfidenceLevel.INFERRED,
-                ))
-    return items
+            var = line.split("=")[0].strip()
+            evidence.append(make_evidence(
+                r, ".env.example",
+                f"Environment variable: {var}",
+                0.75, var,
+                confidence=Confidence.INFERRED,
+            ))
+    return evidence

@@ -1,15 +1,12 @@
-const API_BASE = "";
+const BASE = "";
 
-export async function analyzeRepository(repositoryUrl) {
-  const response = await fetch(`${API_BASE}/api/analyze`, {
+export async function analyzeRepo(url) {
+  const res = await fetch(`${BASE}/api/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repository_url: repositoryUrl }),
+    body: JSON.stringify({ url }),
   });
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.detail || "Analysis failed");
-  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "Analysis failed");
   return data;
 }
