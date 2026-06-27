@@ -3,7 +3,7 @@
 # It will be copied into dist/ during build.
 
 # API requests → Worker (set VITE_WORKER_URL in Pages env vars)
-# /api/*  :VITE_WORKER_URL/api/:splat  200
+/api/*  https://pipeline-scout-production.up.railway.app/api/:splat  200
 
 # SPA fallback — all unmatched routes serve index.html
 /*  /index.html  200
